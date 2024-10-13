@@ -1,17 +1,19 @@
-server_pool:
+proxy_server: 
+  address: localhost:8080
+
+backend_servers:
   - http://localhost:2000
   - http://localhost:3000
   - http://localhost:4000
 
 worker_processes: 4
-listen_port: 8080
 
 routing:
   strategy: round_robin
 
 health_check:
   enabled: true
-  interval: 2
+  interval: 5
   timeout: 4
 
 logging:

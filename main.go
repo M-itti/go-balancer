@@ -3,7 +3,7 @@ package main
 import (
 	"github.com/valyala/fasthttp"
 	"go.uber.org/zap"
-	"go_balancer/config"
+	"go-balancer/config"
 	"net/http"
 	"sync"
 	"time"
@@ -90,7 +90,7 @@ func (r *Router) Route() string {
 }
 
 type HealthCheck struct {
-	serverPool map[string]*ServerData
+	serverData map[string]*ServerData
 	interval   time.Duration
 	timeout    time.Duration
 	enabled    bool
@@ -113,12 +113,12 @@ func (hc *HealthCheck) PerformCheck() {
 			var wg sync.WaitGroup
 
 			// Check each server concurrently
-			for server := range hc.serverPool {
+			for server := range hc.serverData {
 				wg.Add(1)
 				go func(server string) {
 					defer wg.Done()
 					alive := hc.checkServer(server)
-					hc.serverPool[server].Alive = alive
+					hc.serverData[server].Alive = alive
 				}(server)
 			}
 
@@ -164,9 +164,12 @@ func StartServer(address string, router *Router) error {
 	return fasthttp.ListenAndServe(address, requestHandler)
 }
 
-// handles an incoming request and forwards it to the backend server
+// ReverseProxy handles an incoming request and forwards it to the backend server
 func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router) {
-	backend_server := router.Route()
+	backendServer := router.Route() // Get the backend server URL
+
+	// Log the incoming request
+	logger.Info("Received request", zap.String("method", string(ctx.Method())), zap.String("uri", string(ctx.RequestURI())))
 
 	// Acquire a request object from the pool and copy the incoming request
 	req := fasthttp.AcquireRequest()
@@ -174,7 +177,10 @@ func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router) {
 	ctx.Request.CopyTo(req)
 
 	// Set the backend server URL with the original request URI
-	req.SetRequestURI(backend_server + string(ctx.RequestURI()))
+	req.SetRequestURI(backendServer + string(ctx.RequestURI()))
+
+	// Log the proxying action
+	logger.Info("Forwarding request to backend", zap.String("backend_server", backendServer), zap.String("full_request_uri", string(req.RequestURI())))
 
 	// Acquire a response object to store the backend's response
 	resp := fasthttp.AcquireResponse()
@@ -184,9 +190,12 @@ func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router) {
 	err := fasthttp.Do(req, resp)
 	if err != nil {
 		ctx.Error("Failed to reach backend", fasthttp.StatusBadGateway)
-		logger.Error("Error proxying request", zap.Error(err))
+		logger.Error("Error proxying request", zap.Error(err), zap.String("backend_server", backendServer))
 		return
 	}
+
+	// Log the response status code from the backend
+	logger.Info("Received response from backend", zap.Int("status_code", resp.StatusCode()))
 
 	// Forward response from backend back to client
 	resp.CopyTo(&ctx.Response)
@@ -204,12 +213,9 @@ func main() {
 	if err != nil {
 		logger.Fatal("Error loading config", zap.Error(err))
 	}
-	serverPool := cfg.Serverpool
-	balancerStrat := cfg.Routing.Strategy
-
 	serverData := make(map[string]*ServerData)
-
-	for _, serverURL := range serverPool {
+    
+	for _, serverURL := range cfg.Serverpool {
 		serverData[serverURL] = &ServerData{
 			Connections: 0,
 			Alive:       true,
@@ -218,13 +224,13 @@ func main() {
 
 	router := &Router{}
 
-	switch balancerStrat {
+	switch cfg.Routing.Strategy {
 	case "round_robin":
 		logger.Info("Using round-robin strategy.")
 		roundRobinStrategy := &RoundRobin{
 			currentIndex: 0,
 			servers:      serverData,
-			keys:         serverPool,
+			keys:         cfg.Serverpool,
 		}
 		router.SetStrategy(roundRobinStrategy)
 
@@ -236,19 +242,19 @@ func main() {
 		router.SetStrategy(leastConnectionStrategy)
 
 	default:
-		logger.Error("Unknown balancer strategy", zap.String("strategy", balancerStrat))
+		logger.Error("Unknown balancer strategy", zap.String("strategy", cfg.Routing.Strategy))
 	}
-
+    
 	healthCheck := &HealthCheck{
-		serverPool: serverData,
-		interval:   10 * time.Second,
-		timeout:    2 * time.Second,
-		enabled:    true,
+		serverData: serverData,
+		interval:   time.Duration(cfg.Healthcheck.Interval) * time.Second,
+		timeout:    time.Duration(cfg.Healthcheck.Timeout) * time.Second,
+		enabled:    cfg.Healthcheck.Enabled,
 	}
 
 	go healthCheck.PerformCheck()
-
-	if err := StartServer("127.0.0.1:8080", router); err != nil {
+    
+	if err := StartServer(cfg.ProxyServer.Address, router); err != nil {
 		logger.Fatal("Error starting server", zap.Error(err))
 	}
 }

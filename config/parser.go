@@ -2,15 +2,16 @@ package config
 import (
 	"gopkg.in/yaml.v3"
 	"io/ioutil"
-	//"log"
 	"os"
 )
 
 // config represents the structure of the yaml configuration
 type Config struct {
-	Serverpool      []string `yaml:"server_pool"`
+    ProxyServer     struct {
+        Address string `yaml:"address"`
+    } `yaml:"proxy_server"`
+	Serverpool      []string `yaml:"backend_servers"`
 	Workerprocesses int      `yaml:"worker_processes"`
-	Listenport      int      `yaml:"listen_port"`
 	Routing         struct {
 		Strategy string `yaml:"strategy"`
 	} `yaml:"routing"`
