@@ -1,13 +1,14 @@
 package main
 import (
-	"log"
-	"fmt"
 	"github.com/valyala/fasthttp"
     "sync"
     "time"
     "net/http"
     "go_balancer/config"
+    "go.uber.org/zap"
 )
+
+var logger *zap.Logger
 
 // includes detail about state of each backend server
 type ServerData struct {
@@ -102,7 +103,7 @@ func (hc *HealthCheck) PerformCheck() {
         return
     }
 
-    log.Println("Starting health check...")
+    logger.Info("Starting health check...")
 
     ticker := time.NewTicker(hc.interval)
     defer ticker.Stop()
@@ -134,20 +135,23 @@ func (hc *HealthCheck) checkServer(server string) bool {
         Timeout: hc.timeout,
     }
 
-    log.Printf("Checking server: %s", server)
+    logger.Info("Checking server", zap.String("server", server))
     resp, err := client.Get(server)
     if err != nil {
-        log.Printf("Server %s is down: %v", server, err)
+        logger.Error("Server is down", zap.String("server", server), zap.Error(err))
         return false
     }
     defer resp.Body.Close()
 
     if resp.StatusCode == http.StatusOK {
-        log.Printf("Server %s is alive", server)
+        logger.Info("Server is alive", zap.String("server", server))
         return true
     }
 
-    log.Printf("Server %s returned status %d", server, resp.StatusCode)
+    logger.Info("Server returned status",
+        zap.String("server", server),
+        zap.Int("status_code", resp.StatusCode),
+    )
     return false
 }
 
@@ -164,8 +168,8 @@ func StartServer(address string, router *Router) error {
 	requestHandler := func(ctx *fasthttp.RequestCtx) {
 		ReverseProxy(ctx, router)
 	}
-
-	log.Printf("Starting reverse proxy on %s", address)
+    
+    logger.Info("Starting reverse proxy on", zap.String("address", address))
 	return fasthttp.ListenAndServe(address, requestHandler)
 }
 
@@ -189,7 +193,7 @@ func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router) {
 	err := fasthttp.Do(req, resp)
 	if err != nil {
 		ctx.Error("Failed to reach backend", fasthttp.StatusBadGateway)
-		log.Printf("Error proxying request: %v", err)
+        logger.Error("Error proxying request", zap.Error(err))
 		return
 	}
 
@@ -198,17 +202,22 @@ func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router) {
 }
 
 func main() {
-    
+    var err error // this for global logger, remove later
+    logger, err = zap.NewDevelopment()
+    if err != nil {
+        panic(err)
+    }
+    defer logger.Sync()
+
     cfg, err := config.LoadConfig("config.yaml")
     if err != nil {
-        log.Fatalf("error loading config %s", err)
+        logger.Fatal("Error loading config", zap.Error(err))
     }
     serverPool := cfg.Serverpool
     balancerStrat := cfg.Routing.Strategy
 
 	serverData := make(map[string]*ServerData)
 
-	// Loop over the server pool and add each entry to the map
 	for _, serverURL := range serverPool {
 		serverData[serverURL] = &ServerData{
 			Connections: 0,
@@ -216,28 +225,27 @@ func main() {
 		}
 	}
 
-    serverKeys := []string{"http://localhost:2000", "http://localhost:3000", "http://localhost:4000"}
     router := &Router{}
-    
-    // TODO: switch to switch case
-	if balancerStrat == "round_robin" {
-		fmt.Println("Using round-robin strategy.")
+
+    switch balancerStrat {
+    case "round_robin":
+        logger.Info("Using round-robin strategy.")
         roundRobinStrategy := &RoundRobin{
             currentIndex: 0,
             servers:      serverData,
-            keys: serverKeys,
+            keys:         serverPool,
         }
         router.SetStrategy(roundRobinStrategy)
 
-	} else if balancerStrat == "least_connection" {
-        fmt.Println("Using RoundRobin strategy:")
-        // TODO: this is hard coded
+    case "least_connection":
+        logger.Info("Using least connection strategy.")
         leastConnectionStrategy := &LeastConnection{
             servers: serverData,
         }
         router.SetStrategy(leastConnectionStrategy)
-       } else {
-        fmt.Printf("Unknown balancer strategy: %s\n", balancerStrat)
+
+    default:
+        logger.Error("Unknown balancer strategy", zap.String("strategy", balancerStrat))
     }
 
     healthCheck := &HealthCheck{
@@ -247,13 +255,9 @@ func main() {
         enabled:    true,
     }
     
-    
     go healthCheck.PerformCheck()
 
-
-	// Start the proxy server
-	if err := StartServer(":8080", router); err != nil {
-		log.Fatalf("Error starting server: %s", err)
+	if err := StartServer("127.0.0.1:8080", router); err != nil {
+        logger.Fatal("Error starting server", zap.Error(err))
 	}
 }
-

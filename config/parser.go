@@ -48,13 +48,3 @@ func LoadConfig(filePath string) (*Config, error) {
 
 	return &cfg, nil
 }
-/*
-fmt.Printf("Worker Processes: %d\n", config.WorkerProcesses)
-fmt.Printf("Listen Port: %d\n", config.ListenPort)
-fmt.Printf("Routing Strategy: %s\n", config.Routing.Strategy)
-fmt.Printf("Health Check Enabled: %t\n", config.HealthCheck.Enabled)
-fmt.Printf("Health Check Interval: %d\n", config.HealthCheck.Interval)
-fmt.Printf("Health Check Timeout: %d\n", config.HealthCheck.Timeout)
-fmt.Printf("Logging Level: %s\n", config.Logging.Level)
-fmt.Printf("Logging File: %s\n", config.Logging.File)
-*/
