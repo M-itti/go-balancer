@@ -13,8 +13,10 @@ routing:
 
 health_check:
   enabled: true
-  interval: 5
-  timeout: 4
+  timeout: 0           # 0 to disable timeout
+  interval: 5          # Interval in seconds for regular health checks
+  max_backoff: 60      # Maximum backoff time in seconds for retrying failed servers
+  initial_backoff: 2.0 # Initial backoff interval in seconds, allowing float values
 
 logging:
   level: "DEBUG"

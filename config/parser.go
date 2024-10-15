@@ -5,7 +5,6 @@ import (
 	"os"
 )
 
-// config represents the structure of the yaml configuration
 type Config struct {
     ProxyServer     struct {
         Address string `yaml:"address"`
@@ -16,9 +15,11 @@ type Config struct {
 		Strategy string `yaml:"strategy"`
 	} `yaml:"routing"`
 	Healthcheck struct {
-		Enabled  bool `yaml:"enabled"`
 		Interval int  `yaml:"interval"`
+        InitialBackoff float64 `yaml:"initial_backoff"`
+		MaxBackoff int  `yaml:"max_backoff"`
 		Timeout  int  `yaml:"timeout"`
+		Enabled  bool `yaml:"enabled"`
 	} `yaml:"health_check"`
 	Logging struct {
 		Level string `yaml:"level"`

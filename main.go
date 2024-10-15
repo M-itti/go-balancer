@@ -7,22 +7,26 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	"fmt"
+	"math"
+	"math/rand"
 )
 
 var logger *zap.Logger
+var mu sync.Mutex
 
-// includes detail about state of each backend server
 type ServerData struct {
 	Connections int
 	Alive       bool
+    attempt     int
+    checkInterval time.Duration
+    lastCheckTime time.Time
 }
 
-// strategy interface
 type Strategy interface {
 	Route() string
 }
 
-// concrete
 type RoundRobin struct {
 	currentIndex int
 	servers      map[string]*ServerData
@@ -36,12 +40,15 @@ func (r *RoundRobin) Route() string {
 
 	// Iterate over servers based on the keys slice
 	for {
+        mu.Lock()
 		server := r.keys[r.currentIndex]
 		r.currentIndex = (r.currentIndex + 1) % len(r.keys)
+        mu.Unlock()
 
 		if r.servers[server].Alive {
 			return server
 		}
+        return ""
 	}
 }
 
@@ -76,12 +83,12 @@ type Router struct {
 	strategy Strategy
 }
 
-// SetStrategy sets the routing strategy
+// sets the routing strategy
 func (r *Router) SetStrategy(strategy Strategy) {
 	r.strategy = strategy
 }
 
-// Route delegates the routing to the current strategy
+// delegates the routing to the current strategy
 func (r *Router) Route() string {
 	if r.strategy == nil {
 		return "No strategy set"
@@ -90,72 +97,75 @@ func (r *Router) Route() string {
 }
 
 type HealthCheck struct {
-	serverData map[string]*ServerData
-	interval   time.Duration
-	timeout    time.Duration
-	enabled    bool
+	interval       time.Duration
+	initialBackoff time.Duration
+	maxBackoff     time.Duration
+    timeout        time.Duration
+	serverPool     map[string]*ServerData
+    mu             sync.Mutex
+    enabled        bool
 }
 
-// PerformCheck runs the health checks in a continuous loop
-func (hc *HealthCheck) PerformCheck() {
-	if !hc.enabled {
-		return
-	}
+func (hc *HealthCheck) retry(server string) {
+    httpClient := &http.Client{}
 
-	logger.Info("Starting health check...")
-
-	ticker := time.NewTicker(hc.interval)
-	defer ticker.Stop()
+    if hc.timeout > 0 { 
+        httpClient.Timeout = hc.timeout
+    }
+	attempt := 0
 
 	for {
-		select {
-		case <-ticker.C:
-			var wg sync.WaitGroup
-
-			// Check each server concurrently
-			for server := range hc.serverData {
-				wg.Add(1)
-				go func(server string) {
-					defer wg.Done()
-					alive := hc.checkServer(server)
-					hc.serverData[server].Alive = alive
-				}(server)
-			}
-
-			// Wait for all checks to complete
-			wg.Wait()
+		fmt.Printf("Retrying server: %s, attempt: %d\n", server, attempt+1)
+		_, err := http.Get(server)
+		if err == nil {
+			hc.mu.Lock()
+			hc.serverPool[server].Alive = true
+			hc.mu.Unlock()
+			fmt.Printf("Server %s is back online\n", server)
+			break
 		}
+		hc.mu.Lock()
+		hc.serverPool[server].Alive = false
+		hc.mu.Unlock()
+		backoffTime := hc.calculateBackoff(attempt)
+		fmt.Printf("Failed to reach %s. Waiting for %.2f seconds before next retry...\n", server, backoffTime.Seconds())
+		time.Sleep(backoffTime)
+		attempt++
 	}
 }
 
-// checkServer performs a single health check on the given server
-func (hc *HealthCheck) checkServer(server string) bool {
-	client := http.Client{
-		Timeout: hc.timeout,
-	}
+func (hc *HealthCheck) calculateBackoff(attempt int) time.Duration {
+	backoffTime := float64(hc.initialBackoff) * math.Pow(2, float64(attempt))
+	jitter := rand.Float64() * float64(hc.initialBackoff)
+	totalSleepTime := time.Duration(math.Min(backoffTime, float64(hc.maxBackoff)) + jitter)
+	return totalSleepTime
+}
 
-	logger.Info("Checking server", zap.String("server", server))
-	resp, err := client.Get(server)
-	if err != nil {
-		logger.Error("Server is down", zap.String("server", server), zap.Error(err))
-		return false
+func (hc *HealthCheck) healthCheck() {
+	for {
+		for server := range hc.serverPool {
+			hc.mu.Lock()
+			alive := hc.serverPool[server].Alive
+			hc.mu.Unlock()
+			if alive {
+				_, err := http.Get(server)
+				if err == nil {
+					fmt.Printf("Server %s is alive.\n", server)
+				} else {
+					fmt.Printf("Server %s is down.\n", server)
+					hc.mu.Lock()
+					hc.serverPool[server].Alive = false
+					hc.mu.Unlock()
+					go hc.retry(server)
+				}
+			}
+		}
+		fmt.Println()
+		time.Sleep(hc.interval)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusOK {
-		logger.Info("Server is alive", zap.String("server", server))
-		return true
-	}
-
-	logger.Info("Server returned status",
-		zap.String("server", server),
-		zap.Int("status_code", resp.StatusCode),
-	)
-	return false
 }
 
 func StartServer(address string, router *Router) error {
-	// Define the request handler that will process incoming requests
 	requestHandler := func(ctx *fasthttp.RequestCtx) {
 		ReverseProxy(ctx, router)
 	}
@@ -219,6 +229,7 @@ func main() {
 		serverData[serverURL] = &ServerData{
 			Connections: 0,
 			Alive:       true,
+			checkInterval: time.Duration(cfg.Healthcheck.Interval) * time.Second,
 		}
 	}
 
@@ -245,14 +256,20 @@ func main() {
 		logger.Error("Unknown balancer strategy", zap.String("strategy", cfg.Routing.Strategy))
 	}
     
-	healthCheck := &HealthCheck{
-		serverData: serverData,
-		interval:   time.Duration(cfg.Healthcheck.Interval) * time.Second,
-		timeout:    time.Duration(cfg.Healthcheck.Timeout) * time.Second,
-		enabled:    cfg.Healthcheck.Enabled,
+	hc := &HealthCheck{
+		initialBackoff: time.Duration(cfg.Healthcheck.InitialBackoff) * time.Second,
+		interval:       time.Duration(cfg.Healthcheck.Interval) * time.Second,
+		maxBackoff:     time.Duration(cfg.Healthcheck.MaxBackoff) * time.Second,
+        timeout:        time.Duration(cfg.Healthcheck.Timeout) * time.Second, 
+		enabled:        cfg.Healthcheck.Enabled,
+        serverPool:     serverData, 
+        mu:             sync.Mutex{}, 
 	}
 
-	go healthCheck.PerformCheck()
+    if cfg.Healthcheck.Enabled {
+        logger.Info("Starting Healthcheck")
+        go hc.healthCheck()
+    }
     
 	if err := StartServer(cfg.ProxyServer.Address, router); err != nil {
 		logger.Fatal("Error starting server", zap.Error(err))
