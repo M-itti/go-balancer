@@ -15,8 +15,6 @@ import (
 	"time"
 )
 
-var logger *zap.Logger
-
 type ServerData struct {
 	Connections   int
 	Alive         bool
@@ -188,9 +186,9 @@ func (hc *HealthCheck) retry(server string) {
 	}
 }
 
-func StartServer(address string, router *Router) error {
+func StartServer(address string, router *Router, logger *zap.Logger) error {
 	requestHandler := func(ctx *fasthttp.RequestCtx) {
-		ReverseProxy(ctx, router)
+		ReverseProxy(ctx, router, logger)
 	}
 
 	logger.Info("Starting reverse proxy on", zap.String("address", address))
@@ -198,7 +196,7 @@ func StartServer(address string, router *Router) error {
 }
 
 // ReverseProxy handles an incoming request and forwards it to the backend server
-func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router) {
+func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router, logger *zap.Logger) {
 	backendServer, err := router.Route() // Get the backend server URL
 	if err != nil {
 		ctx.Error("No backend server available", fasthttp.StatusServiceUnavailable)
@@ -267,8 +265,7 @@ func NewHealthCheck(cfg *config.Config, serverData map[string]*ServerData) (*Hea
 }
 
 func main() {
-	var err error // this for global logger, remove later
-	logger, err = zap.NewProduction()
+    logger, err := zap.NewProduction()
 	if err != nil {
 		panic(err)
 	}
@@ -323,7 +320,7 @@ func main() {
 		go hc.healthCheck()
 	}
 
-	if err := StartServer(cfg.ProxyServer.Address, router); err != nil {
+	if err := StartServer(cfg.ProxyServer.Address, router, logger); err != nil {
 		logger.Fatal("Error starting server", zap.Error(err))
 	}
 }
