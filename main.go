@@ -1,28 +1,28 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"github.com/valyala/fasthttp"
-	"go.uber.org/zap"
-    "go.uber.org/zap/zapcore"
 	"go-balancer/config"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"math"
+	"math/rand"
 	"net/http"
-    "math"
-    "math/rand"
+	"os"
 	"sync"
 	"time"
-    "os"
-    "fmt"
-    "errors"
 )
 
 var logger *zap.Logger
 
 type ServerData struct {
-	Connections int
-	Alive       bool
-    attempt     int
-    checkInterval time.Duration
-    lastCheckTime time.Time
+	Connections   int
+	Alive         bool
+	attempt       int
+	checkInterval time.Duration
+	lastCheckTime time.Time
 }
 
 type Strategy interface {
@@ -33,7 +33,7 @@ type RoundRobin struct {
 	currentIndex int
 	servers      map[string]*ServerData
 	keys         []string
-    mu             sync.Mutex
+	mu           sync.Mutex
 }
 
 func (r *RoundRobin) Route() string {
@@ -43,21 +43,21 @@ func (r *RoundRobin) Route() string {
 
 	// Iterate over servers based on the keys slice
 	for {
-        r.mu.Lock()
+		r.mu.Lock()
 		server := r.keys[r.currentIndex]
 		r.currentIndex = (r.currentIndex + 1) % len(r.keys)
-        r.mu.Unlock()
+		r.mu.Unlock()
 
 		if r.servers[server].Alive {
 			return server
 		}
-        return ""
+		return ""
 	}
 }
 
 type LeastConnection struct {
 	servers map[string]*ServerData
-    mu             sync.RWMutex
+	mu      sync.RWMutex
 }
 
 func (l *LeastConnection) Route() string {
@@ -69,20 +69,20 @@ func (l *LeastConnection) Route() string {
 	var leastConnServer string
 	minConnections := int(^uint(0) >> 1) // maximum int value
 
-    l.mu.RLock()
+	l.mu.RLock()
 	for server, data := range l.servers {
 		if data.Alive && data.Connections < minConnections {
 			leastConnServer = server
 			minConnections = data.Connections
 		}
 	}
-    l.mu.RUnlock()
+	l.mu.RUnlock()
 
 	// Update connections count for the selected server
 	if leastConnServer != "" {
-        l.mu.Lock()
+		l.mu.Lock()
 		l.servers[leastConnServer].Connections++
-        l.mu.Unlock()
+		l.mu.Unlock()
 	}
 
 	return leastConnServer
@@ -109,11 +109,11 @@ type HealthCheck struct {
 	interval       time.Duration
 	initialBackoff time.Duration
 	maxBackoff     time.Duration
-    timeout        time.Duration
+	timeout        time.Duration
 	serverPool     map[string]*ServerData
-    mu             sync.Mutex
-    enabled        bool
-    logger         *zap.Logger
+	mu             sync.Mutex
+	enabled        bool
+	logger         *zap.Logger
 }
 
 func (hc *HealthCheck) calculateBackoff(attempt int) time.Duration {
@@ -132,9 +132,9 @@ func (hc *HealthCheck) healthCheck() {
 			if alive {
 				_, err := http.Get(server)
 				if err == nil {
-                    hc.logger.Info("Server is alive", zap.String("server", server))
-				} else {    
-                    hc.logger.Warn("Server is down", zap.String("server", server))
+					hc.logger.Info("Server is alive", zap.String("server", server))
+				} else {
+					hc.logger.Warn("Server is down", zap.String("server", server))
 					hc.mu.Lock()
 					hc.serverPool[server].Alive = false
 					hc.mu.Unlock()
@@ -147,45 +147,45 @@ func (hc *HealthCheck) healthCheck() {
 }
 
 func (hc *HealthCheck) retry(server string) {
-    httpClient := &http.Client{}
+	httpClient := &http.Client{}
 
-    if hc.timeout > 0 { 
-        httpClient.Timeout = hc.timeout
-    }
-    attempt := 0
+	if hc.timeout > 0 {
+		httpClient.Timeout = hc.timeout
+	}
+	attempt := 0
 
-    for {
-        hc.logger.Info("Retrying server",
-            zap.String("server", server),
-            zap.Int("attempt", attempt+1),
-        )
-        
-        _, err := httpClient.Get(server)
-        if err == nil {
-            hc.mu.Lock()
-            hc.serverPool[server].Alive = true
-            hc.mu.Unlock()
-            
-            // Log successful reconnection
-            hc.logger.Info("Server is back online", zap.String("server", server))
-            break
-        }
-        
-        hc.mu.Lock()
-        hc.serverPool[server].Alive = false
-        hc.mu.Unlock()
-        
-        backoffTime := hc.calculateBackoff(attempt)
-        
-        // Log failure to reach server with backoff information
-        hc.logger.Warn("Failed to reach server, retrying",
-            zap.String("server", server),
-            zap.Duration("backoff", backoffTime),
-        )
-        
-        time.Sleep(backoffTime)
-        attempt++
-    }
+	for {
+		hc.logger.Info("Retrying server",
+			zap.String("server", server),
+			zap.Int("attempt", attempt+1),
+		)
+
+		_, err := httpClient.Get(server)
+		if err == nil {
+			hc.mu.Lock()
+			hc.serverPool[server].Alive = true
+			hc.mu.Unlock()
+
+			// Log successful reconnection
+			hc.logger.Info("Server is back online", zap.String("server", server))
+			break
+		}
+
+		hc.mu.Lock()
+		hc.serverPool[server].Alive = false
+		hc.mu.Unlock()
+
+		backoffTime := hc.calculateBackoff(attempt)
+
+		// Log failure to reach server with backoff information
+		hc.logger.Warn("Failed to reach server, retrying",
+			zap.String("server", server),
+			zap.Duration("backoff", backoffTime),
+		)
+
+		time.Sleep(backoffTime)
+		attempt++
+	}
 }
 
 func StartServer(address string, router *Router) error {
@@ -200,11 +200,11 @@ func StartServer(address string, router *Router) error {
 // ReverseProxy handles an incoming request and forwards it to the backend server
 func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router) {
 	backendServer, err := router.Route() // Get the backend server URL
-    if err != nil {
-        ctx.Error("No backend server available", fasthttp.StatusServiceUnavailable)
-        logger.Error("Error selecting backend server", zap.Error(err))
-        return
-    }
+	if err != nil {
+		ctx.Error("No backend server available", fasthttp.StatusServiceUnavailable)
+		logger.Error("Error selecting backend server", zap.Error(err))
+		return
+	}
 
 	logger.Info("Received request", zap.String("method", string(ctx.Method())), zap.String("uri", string(ctx.RequestURI())))
 
@@ -237,7 +237,7 @@ func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router) {
 }
 
 func NewHealthCheck(cfg *config.Config, serverData map[string]*ServerData) (*HealthCheck, error) {
-    // TODO: hard coded
+	// TODO: hard coded
 	healthLogFile, err := os.OpenFile("/tmp/healthcheck.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open healthcheck.log: %w", err)
@@ -279,11 +279,11 @@ func main() {
 		logger.Fatal("Error loading config", zap.Error(err))
 	}
 	serverData := make(map[string]*ServerData)
-    
+
 	for _, serverURL := range cfg.Serverpool {
 		serverData[serverURL] = &ServerData{
-			Connections: 0,
-			Alive:       true,
+			Connections:   0,
+			Alive:         true,
 			checkInterval: time.Duration(cfg.Healthcheck.Interval) * time.Second,
 		}
 	}
@@ -297,7 +297,7 @@ func main() {
 			currentIndex: 0,
 			servers:      serverData,
 			keys:         cfg.Serverpool,
-            mu:           sync.Mutex{},
+			mu:           sync.Mutex{},
 		}
 		router.SetStrategy(roundRobinStrategy)
 
@@ -305,24 +305,24 @@ func main() {
 		logger.Info("Using least connection strategy.")
 		leastConnectionStrategy := &LeastConnection{
 			servers: serverData,
-            mu:             sync.RWMutex{},
+			mu:      sync.RWMutex{},
 		}
 		router.SetStrategy(leastConnectionStrategy)
 
 	default:
 		logger.Error("Unknown balancer strategy", zap.String("strategy", cfg.Routing.Strategy))
 	}
-    
-    hc, err := NewHealthCheck(cfg, serverData) 
-    if err != nil {
-        panic(err)
-    }
 
-    if cfg.Healthcheck.Enabled {
-        logger.Info("Starting Healthcheck")
-        go hc.healthCheck()
-    }
-    
+	hc, err := NewHealthCheck(cfg, serverData)
+	if err != nil {
+		panic(err)
+	}
+
+	if cfg.Healthcheck.Enabled {
+		logger.Info("Starting Healthcheck")
+		go hc.healthCheck()
+	}
+
 	if err := StartServer(cfg.ProxyServer.Address, router); err != nil {
 		logger.Fatal("Error starting server", zap.Error(err))
 	}
