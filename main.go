@@ -24,7 +24,7 @@ type ServerData struct {
 }
 
 type Strategy interface {
-	Route() string
+	Route() (string, error)
 }
 
 type RoundRobin struct {
@@ -34,23 +34,21 @@ type RoundRobin struct {
 	mu           sync.Mutex
 }
 
-func (r *RoundRobin) Route() string {
-	if len(r.keys) == 0 {
-		return "No servers available"
-	}
+func (r *RoundRobin) Route() (string, error) {
+    if len(r.keys) == 0 {
+        return "", errors.New("No servers available")
+    }
 
-	// Iterate over servers based on the keys slice
-	for {
-		r.mu.Lock()
-		server := r.keys[r.currentIndex]
-		r.currentIndex = (r.currentIndex + 1) % len(r.keys)
-		r.mu.Unlock()
+    for {
+        r.mu.Lock()
+        server := r.keys[r.currentIndex]
+        r.currentIndex = (r.currentIndex + 1) % len(r.keys)
+        r.mu.Unlock()
 
-		if r.servers[server].Alive {
-			return server
-		}
-		return ""
-	}
+        if r.servers[server].Alive {
+            return server, nil
+        }
+    }
 }
 
 type LeastConnection struct {
@@ -58,32 +56,39 @@ type LeastConnection struct {
 	mu      sync.RWMutex
 }
 
-func (l *LeastConnection) Route() string {
-	if len(l.servers) == 0 {
-		return "No servers available"
-	}
+func (l *LeastConnection) Route() (string, error) {
+    if len(l.servers) == 0 {
+        return "", errors.New("No servers available")
+    }
 
-	// Find the server with the least connections that is also alive
-	var leastConnServer string
-	minConnections := int(^uint(0) >> 1) // maximum int value
+    var leastConnServer string
+    minConnections := int(^uint(0) >> 1)
 
-	l.mu.RLock()
-	for server, data := range l.servers {
-		if data.Alive && data.Connections < minConnections {
-			leastConnServer = server
-			minConnections = data.Connections
-		}
-	}
-	l.mu.RUnlock()
+    l.mu.RLock()
+    for server, data := range l.servers {
+        if data.Alive && data.Connections < minConnections {
+            leastConnServer = server
+            minConnections = data.Connections
+        }
+    }
+    l.mu.RUnlock()
 
-	// Update connections count for the selected server
-	if leastConnServer != "" {
-		l.mu.Lock()
-		l.servers[leastConnServer].Connections++
-		l.mu.Unlock()
-	}
+    if leastConnServer == "" {
+        return "", errors.New("No alive servers available")
+    }
 
-	return leastConnServer
+    l.mu.Lock()
+    l.servers[leastConnServer].Connections++
+    l.mu.Unlock()
+
+    return leastConnServer, nil
+}
+
+func (r *Router) Route() (string, error) {
+    if r.strategy == nil {
+        return "", errors.New("No strategy set")
+    }
+    return r.strategy.Route()
 }
 
 type Router struct {
@@ -96,11 +101,11 @@ func (r *Router) SetStrategy(strategy Strategy) {
 }
 
 // delegates the routing to the current strategy
-func (r *Router) Route() (string, error) {
+func (r *Router) RouteStrategy() (string, error) {
 	if r.strategy == nil {
 		return "", errors.New("No strategy set")
 	}
-	return r.strategy.Route(), nil
+	return r.strategy.Route()
 }
 
 type HealthCheck struct {
@@ -197,7 +202,7 @@ func StartServer(address string, router *Router, logger *zap.Logger) error {
 
 // ReverseProxy handles an incoming request and forwards it to the backend server
 func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router, logger *zap.Logger) {
-	backendServer, err := router.Route() // Get the backend server URL
+	backendServer, err := router.RouteStrategy() // Get the backend server URL
 	if err != nil {
 		ctx.Error("No backend server available", fasthttp.StatusServiceUnavailable)
 		logger.Error("Error selecting backend server", zap.Error(err))
