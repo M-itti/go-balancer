@@ -3,17 +3,19 @@ package main
 import (
 	"github.com/valyala/fasthttp"
 	"go.uber.org/zap"
+    "go.uber.org/zap/zapcore"
 	"go-balancer/config"
 	"net/http"
+    "math"
+    "math/rand"
 	"sync"
 	"time"
-	"fmt"
-	"math"
-	"math/rand"
+    "os"
+    "fmt"
+    "errors"
 )
 
 var logger *zap.Logger
-var mu sync.Mutex
 
 type ServerData struct {
 	Connections int
@@ -31,6 +33,7 @@ type RoundRobin struct {
 	currentIndex int
 	servers      map[string]*ServerData
 	keys         []string
+    mu             sync.Mutex
 }
 
 func (r *RoundRobin) Route() string {
@@ -40,10 +43,10 @@ func (r *RoundRobin) Route() string {
 
 	// Iterate over servers based on the keys slice
 	for {
-        mu.Lock()
+        r.mu.Lock()
 		server := r.keys[r.currentIndex]
 		r.currentIndex = (r.currentIndex + 1) % len(r.keys)
-        mu.Unlock()
+        r.mu.Unlock()
 
 		if r.servers[server].Alive {
 			return server
@@ -54,6 +57,7 @@ func (r *RoundRobin) Route() string {
 
 type LeastConnection struct {
 	servers map[string]*ServerData
+    mu             sync.RWMutex
 }
 
 func (l *LeastConnection) Route() string {
@@ -64,16 +68,21 @@ func (l *LeastConnection) Route() string {
 	// Find the server with the least connections that is also alive
 	var leastConnServer string
 	minConnections := int(^uint(0) >> 1) // maximum int value
+
+    l.mu.RLock()
 	for server, data := range l.servers {
 		if data.Alive && data.Connections < minConnections {
 			leastConnServer = server
 			minConnections = data.Connections
 		}
 	}
+    l.mu.RUnlock()
 
 	// Update connections count for the selected server
 	if leastConnServer != "" {
+        l.mu.Lock()
 		l.servers[leastConnServer].Connections++
+        l.mu.Unlock()
 	}
 
 	return leastConnServer
@@ -89,11 +98,11 @@ func (r *Router) SetStrategy(strategy Strategy) {
 }
 
 // delegates the routing to the current strategy
-func (r *Router) Route() string {
+func (r *Router) Route() (string, error) {
 	if r.strategy == nil {
-		return "No strategy set"
+		return "", errors.New("No strategy set")
 	}
-	return r.strategy.Route()
+	return r.strategy.Route(), nil
 }
 
 type HealthCheck struct {
@@ -104,34 +113,7 @@ type HealthCheck struct {
 	serverPool     map[string]*ServerData
     mu             sync.Mutex
     enabled        bool
-}
-
-func (hc *HealthCheck) retry(server string) {
-    httpClient := &http.Client{}
-
-    if hc.timeout > 0 { 
-        httpClient.Timeout = hc.timeout
-    }
-	attempt := 0
-
-	for {
-		fmt.Printf("Retrying server: %s, attempt: %d\n", server, attempt+1)
-		_, err := http.Get(server)
-		if err == nil {
-			hc.mu.Lock()
-			hc.serverPool[server].Alive = true
-			hc.mu.Unlock()
-			fmt.Printf("Server %s is back online\n", server)
-			break
-		}
-		hc.mu.Lock()
-		hc.serverPool[server].Alive = false
-		hc.mu.Unlock()
-		backoffTime := hc.calculateBackoff(attempt)
-		fmt.Printf("Failed to reach %s. Waiting for %.2f seconds before next retry...\n", server, backoffTime.Seconds())
-		time.Sleep(backoffTime)
-		attempt++
-	}
+    logger         *zap.Logger
 }
 
 func (hc *HealthCheck) calculateBackoff(attempt int) time.Duration {
@@ -150,9 +132,9 @@ func (hc *HealthCheck) healthCheck() {
 			if alive {
 				_, err := http.Get(server)
 				if err == nil {
-					fmt.Printf("Server %s is alive.\n", server)
-				} else {
-					fmt.Printf("Server %s is down.\n", server)
+                    hc.logger.Info("Server is alive", zap.String("server", server))
+				} else {    
+                    hc.logger.Warn("Server is down", zap.String("server", server))
 					hc.mu.Lock()
 					hc.serverPool[server].Alive = false
 					hc.mu.Unlock()
@@ -160,9 +142,50 @@ func (hc *HealthCheck) healthCheck() {
 				}
 			}
 		}
-		fmt.Println()
 		time.Sleep(hc.interval)
 	}
+}
+
+func (hc *HealthCheck) retry(server string) {
+    httpClient := &http.Client{}
+
+    if hc.timeout > 0 { 
+        httpClient.Timeout = hc.timeout
+    }
+    attempt := 0
+
+    for {
+        hc.logger.Info("Retrying server",
+            zap.String("server", server),
+            zap.Int("attempt", attempt+1),
+        )
+        
+        _, err := httpClient.Get(server)
+        if err == nil {
+            hc.mu.Lock()
+            hc.serverPool[server].Alive = true
+            hc.mu.Unlock()
+            
+            // Log successful reconnection
+            hc.logger.Info("Server is back online", zap.String("server", server))
+            break
+        }
+        
+        hc.mu.Lock()
+        hc.serverPool[server].Alive = false
+        hc.mu.Unlock()
+        
+        backoffTime := hc.calculateBackoff(attempt)
+        
+        // Log failure to reach server with backoff information
+        hc.logger.Warn("Failed to reach server, retrying",
+            zap.String("server", server),
+            zap.Duration("backoff", backoffTime),
+        )
+        
+        time.Sleep(backoffTime)
+        attempt++
+    }
 }
 
 func StartServer(address string, router *Router) error {
@@ -176,9 +199,13 @@ func StartServer(address string, router *Router) error {
 
 // ReverseProxy handles an incoming request and forwards it to the backend server
 func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router) {
-	backendServer := router.Route() // Get the backend server URL
+	backendServer, err := router.Route() // Get the backend server URL
+    if err != nil {
+        ctx.Error("No backend server available", fasthttp.StatusServiceUnavailable)
+        logger.Error("Error selecting backend server", zap.Error(err))
+        return
+    }
 
-	// Log the incoming request
 	logger.Info("Received request", zap.String("method", string(ctx.Method())), zap.String("uri", string(ctx.RequestURI())))
 
 	// Acquire a request object from the pool and copy the incoming request
@@ -189,7 +216,6 @@ func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router) {
 	// Set the backend server URL with the original request URI
 	req.SetRequestURI(backendServer + string(ctx.RequestURI()))
 
-	// Log the proxying action
 	logger.Info("Forwarding request to backend", zap.String("backend_server", backendServer), zap.String("full_request_uri", string(req.RequestURI())))
 
 	// Acquire a response object to store the backend's response
@@ -197,23 +223,52 @@ func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router) {
 	defer fasthttp.ReleaseResponse(resp)
 
 	// Forward the request to the backend server
-	err := fasthttp.Do(req, resp)
+	err = fasthttp.Do(req, resp)
 	if err != nil {
 		ctx.Error("Failed to reach backend", fasthttp.StatusBadGateway)
 		logger.Error("Error proxying request", zap.Error(err), zap.String("backend_server", backendServer))
 		return
 	}
 
-	// Log the response status code from the backend
 	logger.Info("Received response from backend", zap.Int("status_code", resp.StatusCode()))
 
 	// Forward response from backend back to client
 	resp.CopyTo(&ctx.Response)
 }
 
+func NewHealthCheck(cfg *config.Config, serverData map[string]*ServerData) (*HealthCheck, error) {
+    // TODO: hard coded
+	healthLogFile, err := os.OpenFile("/tmp/healthcheck.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open healthcheck.log: %w", err)
+	}
+
+	encoderConfig := zap.NewProductionEncoderConfig()
+	encoderConfig.TimeKey = "timestamp"
+	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+
+	healthCore := zapcore.NewCore(
+		zapcore.NewJSONEncoder(encoderConfig),
+		zapcore.AddSync(healthLogFile),
+		zap.InfoLevel,
+	)
+	healthLogger := zap.New(healthCore)
+
+	return &HealthCheck{
+		initialBackoff: time.Duration(cfg.Healthcheck.InitialBackoff) * time.Second,
+		interval:       time.Duration(cfg.Healthcheck.Interval) * time.Second,
+		maxBackoff:     time.Duration(cfg.Healthcheck.MaxBackoff) * time.Second,
+		timeout:        time.Duration(cfg.Healthcheck.Timeout) * time.Second,
+		enabled:        cfg.Healthcheck.Enabled,
+		serverPool:     serverData,
+		mu:             sync.Mutex{},
+		logger:         healthLogger,
+	}, nil
+}
+
 func main() {
 	var err error // this for global logger, remove later
-	logger, err = zap.NewDevelopment()
+	logger, err = zap.NewProduction()
 	if err != nil {
 		panic(err)
 	}
@@ -242,6 +297,7 @@ func main() {
 			currentIndex: 0,
 			servers:      serverData,
 			keys:         cfg.Serverpool,
+            mu:           sync.Mutex{},
 		}
 		router.SetStrategy(roundRobinStrategy)
 
@@ -249,6 +305,7 @@ func main() {
 		logger.Info("Using least connection strategy.")
 		leastConnectionStrategy := &LeastConnection{
 			servers: serverData,
+            mu:             sync.RWMutex{},
 		}
 		router.SetStrategy(leastConnectionStrategy)
 
@@ -256,15 +313,10 @@ func main() {
 		logger.Error("Unknown balancer strategy", zap.String("strategy", cfg.Routing.Strategy))
 	}
     
-	hc := &HealthCheck{
-		initialBackoff: time.Duration(cfg.Healthcheck.InitialBackoff) * time.Second,
-		interval:       time.Duration(cfg.Healthcheck.Interval) * time.Second,
-		maxBackoff:     time.Duration(cfg.Healthcheck.MaxBackoff) * time.Second,
-        timeout:        time.Duration(cfg.Healthcheck.Timeout) * time.Second, 
-		enabled:        cfg.Healthcheck.Enabled,
-        serverPool:     serverData, 
-        mu:             sync.Mutex{}, 
-	}
+    hc, err := NewHealthCheck(cfg, serverData) 
+    if err != nil {
+        panic(err)
+    }
 
     if cfg.Healthcheck.Enabled {
         logger.Info("Starting Healthcheck")
