@@ -20,6 +20,8 @@ type Config struct {
 		MaxBackoff int  `yaml:"max_backoff"`
 		Timeout  int  `yaml:"timeout"`
 		Enabled  bool `yaml:"enabled"`
+		LogPath  string `yaml:"log_path"`
+
 	} `yaml:"health_check"`
 	Logging struct {
 		Level string `yaml:"level"`

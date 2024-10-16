@@ -169,7 +169,6 @@ func (hc *HealthCheck) retry(server string) {
 			hc.serverPool[server].Alive = true
 			hc.mu.Unlock()
 
-			// Log successful reconnection
 			hc.logger.Info("Server is back online", zap.String("server", server))
 			break
 		}
@@ -240,8 +239,7 @@ func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router, logger *zap.Logger) 
 }
 
 func NewHealthCheck(cfg *config.Config, serverData map[string]*ServerData) (*HealthCheck, error) {
-	// TODO: hard coded
-	healthLogFile, err := os.OpenFile("/tmp/healthcheck.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	healthLogFile, err := os.OpenFile(cfg.Healthcheck.LogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open healthcheck.log: %w", err)
 	}

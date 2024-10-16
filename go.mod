@@ -1,6 +1,6 @@
 module go-balancer
 
-go 1.23.1
+go 1.23
 
 require (
 	github.com/cenkalti/backoff/v4 v4.3.0
