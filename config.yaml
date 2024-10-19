@@ -6,13 +6,11 @@ backend_servers:
   - http://localhost:3000
   - http://localhost:4000
 
-worker_processes: 4
-
 routing:
   strategy: round_robin
 
 health_check:
-  enabled: true
+  enabled: false
   timeout: 0           # 0 to disable timeout
   interval: 5          # Interval in seconds for regular health checks
   max_backoff: 60      # Maximum backoff time in seconds for retrying failed servers
@@ -20,5 +18,5 @@ health_check:
   log_path: "/tmp/healthcheck.log" 
 
 logging:
-  level: "DEBUG"
+  level: "Error"
   file: "/tmp/balancer.log"

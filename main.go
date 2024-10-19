@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
 	"github.com/valyala/fasthttp"
 	"go-balancer/config"
 	"go.uber.org/zap"
@@ -39,7 +40,8 @@ func (r *RoundRobin) Route() (string, error) {
         return "", errors.New("No servers available")
     }
 
-    for {
+    attempts := len(r.keys) // To avoid infinite looping
+    for attempts > 0 {
         r.mu.Lock()
         server := r.keys[r.currentIndex]
         r.currentIndex = (r.currentIndex + 1) % len(r.keys)
@@ -48,7 +50,11 @@ func (r *RoundRobin) Route() (string, error) {
         if r.servers[server].Alive {
             return server, nil
         }
+
+        attempts-- 
     }
+
+    return "", errors.New("No alive servers available")
 }
 
 type LeastConnection struct {
@@ -106,6 +112,69 @@ func (r *Router) RouteStrategy() (string, error) {
 		return "", errors.New("No strategy set")
 	}
 	return r.strategy.Route()
+}
+
+func StartServer(address string, router *Router, logger *zap.Logger) error {
+
+    // TODO: hardcoded
+    client := &fasthttp.Client{
+		Dial: func(addr string) (net.Conn, error) {
+			return fasthttp.DialTimeout(addr, 5*time.Second)
+		},
+		MaxConnsPerHost:     1000,
+		MaxIdleConnDuration: 10 * time.Second,
+		ReadBufferSize:      32 * 1024, // 32KB
+		WriteBufferSize:     32 * 1024, // 32KB
+		ReadTimeout:         30 * time.Second,
+		WriteTimeout:        30 * time.Second,
+    }
+
+	requestHandler := func(ctx *fasthttp.RequestCtx) {
+		ReverseProxy(ctx, router, logger, client)
+	}
+
+    server := &fasthttp.Server{
+        Handler: requestHandler,
+    }
+
+	logger.Info("Starting reverse proxy on", zap.String("address", address))
+	return server.ListenAndServe(address)
+}
+
+func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router, logger *zap.Logger, client *fasthttp.Client) {
+	backendServer, err := router.RouteStrategy() // Get the backend server URL
+	if err != nil {
+		ctx.SetStatusCode(fasthttp.StatusServiceUnavailable)
+		ctx.SetBodyString("No backend server available")
+		logger.Error("Error selecting backend server", zap.Error(err))
+		return
+	}
+    
+	req := &ctx.Request
+
+    // Combine the chosen backend server URL with the 
+    // request path and query parameters from the client.
+	req.SetRequestURI(backendServer + string(ctx.RequestURI()))
+
+    // This will be used to store the response received from the backend server.
+	resp := &ctx.Response
+
+    // Send request to the backend server and populate the response object
+    // with the backend server's response to send back to the client.
+	err = client.Do(req, resp)
+	if err != nil {
+		handleProxyError(ctx, logger, backendServer, err)
+		return
+	}
+}
+
+func handleProxyError(ctx *fasthttp.RequestCtx, logger *zap.Logger, backendServer string, err error) {
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		logger.Error("Request timed out", zap.String("backend_server", backendServer), zap.Error(err))
+	} else {
+		logger.Error("Error proxying request", zap.Error(err), zap.String("backend_server", backendServer))
+	}
+	ctx.Error("Failed to reach backend", fasthttp.StatusBadGateway)
 }
 
 type HealthCheck struct {
@@ -188,54 +257,6 @@ func (hc *HealthCheck) retry(server string) {
 		time.Sleep(backoffTime)
 		attempt++
 	}
-}
-
-func StartServer(address string, router *Router, logger *zap.Logger) error {
-	requestHandler := func(ctx *fasthttp.RequestCtx) {
-		ReverseProxy(ctx, router, logger)
-	}
-
-	logger.Info("Starting reverse proxy on", zap.String("address", address))
-	return fasthttp.ListenAndServe(address, requestHandler)
-}
-
-// ReverseProxy handles an incoming request and forwards it to the backend server
-func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router, logger *zap.Logger) {
-	backendServer, err := router.RouteStrategy() // Get the backend server URL
-	if err != nil {
-		ctx.Error("No backend server available", fasthttp.StatusServiceUnavailable)
-		logger.Error("Error selecting backend server", zap.Error(err))
-		return
-	}
-
-	logger.Info("Received request", zap.String("method", string(ctx.Method())), zap.String("uri", string(ctx.RequestURI())))
-
-	// Acquire a request object from the pool and copy the incoming request
-	req := fasthttp.AcquireRequest()
-	defer fasthttp.ReleaseRequest(req)
-	ctx.Request.CopyTo(req)
-
-	// Set the backend server URL with the original request URI
-	req.SetRequestURI(backendServer + string(ctx.RequestURI()))
-
-	logger.Info("Forwarding request to backend", zap.String("backend_server", backendServer), zap.String("full_request_uri", string(req.RequestURI())))
-
-	// Acquire a response object to store the backend's response
-	resp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseResponse(resp)
-
-	// Forward the request to the backend server
-	err = fasthttp.Do(req, resp)
-	if err != nil {
-		ctx.Error("Failed to reach backend", fasthttp.StatusBadGateway)
-		logger.Error("Error proxying request", zap.Error(err), zap.String("backend_server", backendServer))
-		return
-	}
-
-	logger.Info("Received response from backend", zap.Int("status_code", resp.StatusCode()))
-
-	// Forward response from backend back to client
-	resp.CopyTo(&ctx.Response)
 }
 
 func NewHealthCheck(cfg *config.Config, serverData map[string]*ServerData) (*HealthCheck, error) {

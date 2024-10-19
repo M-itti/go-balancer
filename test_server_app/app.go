@@ -8,6 +8,12 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+// Custom error handling function
+func handleError(ctx *fasthttp.RequestCtx, err error, statusCode int) {
+	ctx.SetStatusCode(statusCode)
+	fmt.Fprintf(ctx, "Error: %s\n", err.Error())
+}
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -20,6 +26,12 @@ func main() {
 
 	// Define routes
 	requestHandler := func(ctx *fasthttp.RequestCtx) {
+		defer func() {
+			if r := recover(); r != nil {
+				handleError(ctx, fmt.Errorf("internal server error"), fasthttp.StatusInternalServerError)
+			}
+		}()
+
 		switch string(ctx.Path()) {
 		case "/":
 			handleHello(ctx, appName)
@@ -47,7 +59,17 @@ func handleHealthCheck(ctx *fasthttp.RequestCtx) {
 
 // handleHello returns a greeting using the APP_NAME environment variable
 func handleHello(ctx *fasthttp.RequestCtx, appName string) {
+	defer func() {
+		if r := recover(); r != nil {
+			handleError(ctx, fmt.Errorf("internal server error"), fasthttp.StatusInternalServerError)
+		}
+	}()
+
 	fmt.Println("starting the work")
+	// Simulate some work that could potentially fail
+	if false { // Change this condition to test error handling
+		panic("simulated error")
+	}
 	fmt.Println("finished")
 	ctx.SetStatusCode(fasthttp.StatusOK)
 	fmt.Fprintf(ctx, "%s! \n", appName)
@@ -55,6 +77,12 @@ func handleHello(ctx *fasthttp.RequestCtx, appName string) {
 
 // handleLongRunningTask simulates a long-running task by sleeping for 5 seconds
 func handleLongRunningTask(ctx *fasthttp.RequestCtx, appName string) {
+	defer func() {
+		if r := recover(); r != nil {
+			handleError(ctx, fmt.Errorf("internal server error"), fasthttp.StatusInternalServerError)
+		}
+	}()
+
 	fmt.Println("starting the work")
 	time.Sleep(5 * time.Second)
 	fmt.Println("finished")
