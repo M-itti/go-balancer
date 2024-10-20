@@ -3,13 +3,13 @@ package main
 import (
 	"errors"
 	"fmt"
-	"net"
 	"github.com/valyala/fasthttp"
 	"go-balancer/config"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -36,25 +36,25 @@ type RoundRobin struct {
 }
 
 func (r *RoundRobin) Route() (string, error) {
-    if len(r.keys) == 0 {
-        return "", errors.New("No servers available")
-    }
+	if len(r.keys) == 0 {
+		return "", errors.New("No servers available")
+	}
 
-    attempts := len(r.keys) // To avoid infinite looping
-    for attempts > 0 {
-        r.mu.Lock()
-        server := r.keys[r.currentIndex]
-        r.currentIndex = (r.currentIndex + 1) % len(r.keys)
-        r.mu.Unlock()
+	attempts := len(r.keys) // To avoid infinite looping
+	for attempts > 0 {
+		r.mu.Lock()
+		server := r.keys[r.currentIndex]
+		r.currentIndex = (r.currentIndex + 1) % len(r.keys)
+		r.mu.Unlock()
 
-        if r.servers[server].Alive {
-            return server, nil
-        }
+		if r.servers[server].Alive {
+			return server, nil
+		}
 
-        attempts-- 
-    }
+		attempts--
+	}
 
-    return "", errors.New("No alive servers available")
+	return "", errors.New("No alive servers available")
 }
 
 type LeastConnection struct {
@@ -63,38 +63,38 @@ type LeastConnection struct {
 }
 
 func (l *LeastConnection) Route() (string, error) {
-    if len(l.servers) == 0 {
-        return "", errors.New("No servers available")
-    }
+	if len(l.servers) == 0 {
+		return "", errors.New("No servers available")
+	}
 
-    var leastConnServer string
-    minConnections := int(^uint(0) >> 1)
+	var leastConnServer string
+	minConnections := int(^uint(0) >> 1)
 
-    l.mu.RLock()
-    for server, data := range l.servers {
-        if data.Alive && data.Connections < minConnections {
-            leastConnServer = server
-            minConnections = data.Connections
-        }
-    }
-    l.mu.RUnlock()
+	l.mu.RLock()
+	for server, data := range l.servers {
+		if data.Alive && data.Connections < minConnections {
+			leastConnServer = server
+			minConnections = data.Connections
+		}
+	}
+	l.mu.RUnlock()
 
-    if leastConnServer == "" {
-        return "", errors.New("No alive servers available")
-    }
+	if leastConnServer == "" {
+		return "", errors.New("No alive servers available")
+	}
 
-    l.mu.Lock()
-    l.servers[leastConnServer].Connections++
-    l.mu.Unlock()
+	l.mu.Lock()
+	l.servers[leastConnServer].Connections++
+	l.mu.Unlock()
 
-    return leastConnServer, nil
+	return leastConnServer, nil
 }
 
 func (r *Router) Route() (string, error) {
-    if r.strategy == nil {
-        return "", errors.New("No strategy set")
-    }
-    return r.strategy.Route()
+	if r.strategy == nil {
+		return "", errors.New("No strategy set")
+	}
+	return r.strategy.Route()
 }
 
 type Router struct {
@@ -116,8 +116,8 @@ func (r *Router) RouteStrategy() (string, error) {
 
 func StartServer(address string, router *Router, logger *zap.Logger) error {
 
-    // TODO: hardcoded
-    client := &fasthttp.Client{
+	// TODO: hardcoded
+	client := &fasthttp.Client{
 		Dial: func(addr string) (net.Conn, error) {
 			return fasthttp.DialTimeout(addr, 30*time.Second)
 		},
@@ -126,23 +126,23 @@ func StartServer(address string, router *Router, logger *zap.Logger) error {
 		WriteBufferSize:     32 * 1024, // 32KB
 		ReadTimeout:         40 * time.Second,
 		WriteTimeout:        40 * time.Second,
-        MaxConnWaitTimeout:  40 * time.Second, 
-        MaxConnsPerHost:     75,
-    }
+		MaxConnWaitTimeout:  40 * time.Second,
+		MaxConnsPerHost:     75,
+	}
 
 	requestHandler := func(ctx *fasthttp.RequestCtx) {
 		ReverseProxy(ctx, router, logger, client)
 	}
 
-    server := &fasthttp.Server{
-        ReadTimeout:                  40 * time.Second,
-        WriteTimeout:                 40 * time.Second,
-        IdleTimeout:                  120 * time.Second,
-        MaxRequestBodySize:           5 * 1024 * 1024, // 5MB
-        TCPKeepalive:                 true,
-        TCPKeepalivePeriod:           40 * time.Second,
-        Handler: requestHandler,
-    }
+	server := &fasthttp.Server{
+		ReadTimeout:        40 * time.Second,
+		WriteTimeout:       40 * time.Second,
+		IdleTimeout:        120 * time.Second,
+		MaxRequestBodySize: 5 * 1024 * 1024, // 5MB
+		TCPKeepalive:       true,
+		TCPKeepalivePeriod: 40 * time.Second,
+		Handler:            requestHandler,
+	}
 
 	logger.Info("Starting reverse proxy on", zap.String("address", address))
 	return server.ListenAndServe(address)
@@ -156,18 +156,18 @@ func ReverseProxy(ctx *fasthttp.RequestCtx, router *Router, logger *zap.Logger, 
 		logger.Error("Error selecting backend server", zap.Error(err))
 		return
 	}
-    
+
 	req := &ctx.Request
 
-    // Combine the chosen backend server URL with the 
-    // request path and query parameters from the client.
+	// Combine the chosen backend server URL with the
+	// request path and query parameters from the client.
 	req.SetRequestURI(backendServer + string(ctx.RequestURI()))
 
-    // This will be used to store the response received from the backend server.
+	// This will be used to store the response received from the backend server.
 	resp := &ctx.Response
 
-    // Send request to the backend server and populate the response object
-    // with the backend server's response to send back to the client.
+	// Send request to the backend server and populate the response object
+	// with the backend server's response to send back to the client.
 	err = client.Do(req, resp)
 	if err != nil {
 		handleProxyError(ctx, logger, backendServer, err)
@@ -296,7 +296,7 @@ func NewHealthCheck(cfg *config.Config, serverData map[string]*ServerData) (*Hea
 }
 
 func main() {
-    logger, err := zap.NewProduction()
+	logger, err := zap.NewProduction()
 	if err != nil {
 		panic(err)
 	}
