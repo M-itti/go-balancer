@@ -3,7 +3,6 @@ module go-balancer
 go 1.23
 
 require (
-	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/valyala/fasthttp v1.56.0
 	go.uber.org/zap v1.27.0
 	gopkg.in/yaml.v3 v3.0.1

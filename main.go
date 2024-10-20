@@ -119,14 +119,15 @@ func StartServer(address string, router *Router, logger *zap.Logger) error {
     // TODO: hardcoded
     client := &fasthttp.Client{
 		Dial: func(addr string) (net.Conn, error) {
-			return fasthttp.DialTimeout(addr, 5*time.Second)
+			return fasthttp.DialTimeout(addr, 30*time.Second)
 		},
-		MaxConnsPerHost:     1000,
-		MaxIdleConnDuration: 10 * time.Second,
+		MaxIdleConnDuration: 40 * time.Second,
 		ReadBufferSize:      32 * 1024, // 32KB
 		WriteBufferSize:     32 * 1024, // 32KB
-		ReadTimeout:         30 * time.Second,
-		WriteTimeout:        30 * time.Second,
+		ReadTimeout:         40 * time.Second,
+		WriteTimeout:        40 * time.Second,
+        MaxConnWaitTimeout:  40 * time.Second, 
+        MaxConnsPerHost:     75,
     }
 
 	requestHandler := func(ctx *fasthttp.RequestCtx) {
@@ -134,6 +135,12 @@ func StartServer(address string, router *Router, logger *zap.Logger) error {
 	}
 
     server := &fasthttp.Server{
+        ReadTimeout:                  40 * time.Second,
+        WriteTimeout:                 40 * time.Second,
+        IdleTimeout:                  120 * time.Second,
+        MaxRequestBodySize:           5 * 1024 * 1024, // 5MB
+        TCPKeepalive:                 true,
+        TCPKeepalivePeriod:           40 * time.Second,
         Handler: requestHandler,
     }
 
